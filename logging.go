@@ -4,23 +4,65 @@ import (
 	"context"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
+	"sync"
 	"time"
 )
 
+type loggingContextKeyType int
+
+const loggingContextKey = loggingContextKeyType(0)
+
+type loggingContextValue struct {
+	mu        sync.RWMutex
+	keyValues []any
+}
+
+func AppendLoggingFields(ctx context.Context, keyValues ...any) {
+	if len(keyValues) == 0 {
+		return
+	}
+	if len(keyValues)%2 != 0 {
+		panic("AppendLoggingFields requires an even number of key-value pairs")
+	}
+
+	value, ok := ctx.Value(loggingContextKey).(*loggingContextValue)
+	if !ok || value == nil {
+		panic("AppendLoggingFields requires a context with logging fields")
+	}
+
+	value.mu.Lock()
+	defer value.mu.Unlock()
+	value.keyValues = append(value.keyValues, keyValues...)
+}
+
+func getLoggingFields(ctx context.Context) []any {
+	value, ok := ctx.Value(loggingContextKey).(*loggingContextValue)
+	if !ok || value == nil {
+		return nil
+	}
+
+	value.mu.RLock()
+	defer value.mu.RUnlock()
+	fields := make([]any, len(value.keyValues))
+	copy(fields, value.keyValues)
+	return fields
+}
+
 type UnaryLogger interface {
 	LogUnaryRequest(c *CallContext, req proto.Message)
-	LogUnaryResponse(c *CallContext, duration time.Duration, req, res proto.Message, err error)
+	LogUnaryResponse(c *CallContext, duration time.Duration, req, res proto.Message, err error, fields ...any)
 }
 
 type StreamLogger interface {
 	LogStreamConnect(c *CallContext)
-	LogStreamDisconnect(c *CallContext, duration time.Duration, err error)
+	LogStreamDisconnect(c *CallContext, duration time.Duration, err error, fields ...any)
 	LogStreamSendMsg(c *CallContext, message proto.Message, err error)
 	LogStreamRecvMsg(c *CallContext, message proto.Message, err error)
 }
 
 func UnaryServerLogger(logger UnaryLogger) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		ctx = context.WithValue(ctx, loggingContextKey, &loggingContextValue{})
 		callCtx := newUnaryCallContext(ctx, info)
 		logger.LogUnaryRequest(callCtx, req.(proto.Message))
 
@@ -28,14 +70,14 @@ func UnaryServerLogger(logger UnaryLogger) grpc.UnaryServerInterceptor {
 		res, err := handler(ctx, req)
 		duration := time.Since(start)
 
-		logger.LogUnaryResponse(callCtx, duration, req.(proto.Message), res.(proto.Message), err)
+		logger.LogUnaryResponse(callCtx, duration, req.(proto.Message), res.(proto.Message), err, getLoggingFields(ctx)...)
 		return res, err
 	}
 }
 
 func StreamServerLogger(logger StreamLogger, logPayload bool) grpc.StreamServerInterceptor {
 	return func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
-		ctx := ss.Context()
+		ctx := context.WithValue(ss.Context(), loggingContextKey, &loggingContextValue{})
 		callCtx := newStreamCallContext(ctx, srv, info)
 		logger.LogStreamConnect(callCtx)
 
@@ -51,7 +93,7 @@ func StreamServerLogger(logger StreamLogger, logPayload bool) grpc.StreamServerI
 		err := handler(srv, ss)
 		duration := time.Since(start)
 
-		logger.LogStreamDisconnect(callCtx, duration, err)
+		logger.LogStreamDisconnect(callCtx, duration, err, getLoggingFields(ctx)...)
 		return err
 	}
 }
