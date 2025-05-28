@@ -25,10 +25,11 @@ func AppendLoggingFields(ctx context.Context, keyValues ...any) {
 		panic("AppendLoggingFields requires an even number of key-value pairs")
 	}
 
-	value, ok := ctx.Value(loggingContextKey).(*loggingContextValue)
-	if !ok || value == nil {
-		panic("AppendLoggingFields requires a context with logging fields")
+	ctxValue := ctx.Value(loggingContextKey)
+	if ctxValue == nil {
+		return
 	}
+	value := ctxValue.(*loggingContextValue)
 
 	value.mu.Lock()
 	defer value.mu.Unlock()
@@ -36,10 +37,11 @@ func AppendLoggingFields(ctx context.Context, keyValues ...any) {
 }
 
 func getLoggingFields(ctx context.Context) []any {
-	value, ok := ctx.Value(loggingContextKey).(*loggingContextValue)
-	if !ok || value == nil {
+	ctxValue := ctx.Value(loggingContextKey)
+	if ctxValue == nil {
 		return nil
 	}
+	value := ctxValue.(*loggingContextValue)
 
 	value.mu.RLock()
 	defer value.mu.RUnlock()
@@ -64,13 +66,15 @@ func UnaryServerLogger(logger UnaryLogger) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		ctx = context.WithValue(ctx, loggingContextKey, &loggingContextValue{})
 		callCtx := newUnaryCallContext(ctx, info)
-		logger.LogUnaryRequest(callCtx, req.(proto.Message))
+		reqMsg, _ := req.(proto.Message)
+		logger.LogUnaryRequest(callCtx, reqMsg)
 
 		start := time.Now()
 		res, err := handler(ctx, req)
 		duration := time.Since(start)
 
-		logger.LogUnaryResponse(callCtx, duration, req.(proto.Message), res.(proto.Message), err, getLoggingFields(ctx)...)
+		resMsg, _ := res.(proto.Message)
+		logger.LogUnaryResponse(callCtx, duration, reqMsg, resMsg, err, getLoggingFields(ctx)...)
 		return res, err
 	}
 }
